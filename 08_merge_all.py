@@ -8,7 +8,6 @@ OUT_DIR = "data/processed"
 os.makedirs(OUT_DIR, exist_ok=True)
 
 # Step 1: Load all four processed files
-print("Loading processed files...")
 
 df_acag = pd.read_csv("data/processed/acag_county_pm25.csv")
 df_epa  = pd.read_csv("data/processed/epa_county_pollution.csv")
