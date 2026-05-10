@@ -25,13 +25,15 @@ print(f"  NO2 satellite:         {df_no2.shape}")
 # Step 2: Drop high-missingness CHR columns identified during processing
 # These variables were unavailable for most of the 2010-2020 period
 CHR_DROP = [
-    "poverty_pct",         # 98.3% missing
-    "male_65plus_pct",     # 98.3% missing
-    "female_65plus_pct",   # 98.3% missing
-    "income_inequality",   # 36.4% missing
-    "pct_white",           # 27.3% missing
-    "uninsured_pct",       # 18.2% missing - uninsured_adults_pct is better
+    "poverty_pct",
+    "male_65plus_pct",
+    "female_65plus_pct",
+    "income_inequality",
+    "pct_white",
+    "uninsured_pct",
+    "primary_care_ratio",    # Scaling inconsistency across CHR years
 ]
+
 df_chr = df_chr.drop(columns=[c for c in CHR_DROP if c in df_chr.columns])
 print(f"\nCHR after dropping sparse columns: {df_chr.shape}")
 
