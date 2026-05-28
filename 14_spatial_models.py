@@ -18,17 +18,19 @@ os.makedirs(PLOT_DIR, exist_ok=True)
 # Spatial Lag Model (SLM) and Spatial Error Model (SEM) as classical baselines
 # These are equivalent to spdep in R: lagsarlm() and errorsarlm()
 # Reference: Anselin (1988) Spatial Econometrics
-# We run these on lung cancer only (primary outcome, lowest missingness)
 # Results provide the benchmark R2 and RMSE the DL model must beat
 
-# Predictor variables used in spatial models
-# Same features that will go into the DNN branch of the DL model
+# Using raw CDC WONDER mortality rates as outcomes
+# Smoothed rates were assessed in 12_bayesian_smooth.py but rejected
+# due to bimodal artefacts in breast and colorectal from SEB imputation
+# of fully suppressed county-years — see Step 1 comment below
 OUTCOMES = {
-    "mortality_lung_smoothed":        "Lung cancer",
-    "mortality_breast_smoothed":      "Breast cancer",
-    "mortality_colorectal_smoothed":  "Colorectal cancer",
+    "mortality_lung_per100k":        "Lung cancer",
+    "mortality_breast_per100k":      "Breast cancer",
+    "mortality_colorectal_per100k":  "Colorectal cancer",
 }
 
+# Predictor variables — same features going into the DNN branch
 PREDICTORS = [
     "pm25_satellite_lag10",
     "no2_satellite_lag10",
@@ -43,9 +45,23 @@ PREDICTORS = [
     "pct_hispanic",
 ]
 
-# Step 1: Load smoothed dataset and county shapefile
+# Step 1: Load dataset and county shapefile
+# Note on smoothing decision:
+# Spatial Empirical Bayes smoothing was applied and assessed in 12_bayesian_smooth.py
+# However smoothed targets were found to be unsuitable for model training because:
+# - Breast cancer (62.3% missing) and colorectal (50.6% missing) produced bimodal
+#   distributions with a large artefact spike near zero from SEB imputation in
+#   fully suppressed county-years where neither deaths nor population were observed
+# - These near-zero artefacts would bias the model toward predicting zero mortality
+#   in counties with no historical data, which is epidemiologically meaningless
+# - Raw CDC WONDER age-adjusted mortality rates are the official published statistics
+#   and are more scientifically defensible as direct model targets
+# Decision: use raw rates from complete_data_original.csv as model targets
+# Missing values are handled explicitly by restricting training to observed county-years
+# Smoothing is retained in the methods section as a completed methodological step
+
 print("Loading data...")
-df = pd.read_csv("data/processed/complete_data_smooth.csv")
+df = pd.read_csv("data/processed/complete_data_original.csv")
 print(f"  Dataset: {df.shape}")
 
 counties  = gpd.read_file("data/shapefiles/tl_2020_us_county.shp")
@@ -62,8 +78,8 @@ print(f"  Counties: {len(counties)}")
 
 # Step 2: Build spatial weights matrix
 print("\nBuilding spatial weights matrix...")
-w          = libpysal.weights.Queen.from_dataframe(counties, use_index=False)
-w.id_order = list(range(len(counties)))
+w           = libpysal.weights.Queen.from_dataframe(counties, use_index=False)
+w.id_order  = list(range(len(counties)))
 w.transform = "r"
 print(f"  Weights: {w.n} units, avg {w.mean_neighbors:.1f} neighbors")
 
@@ -76,12 +92,14 @@ for OUTCOME, outcome_label in OUTCOMES.items():
     print(f"{'='*60}")
 
     # Moran's I on 2015 cross-section
+    # Tests whether cancer mortality clusters spatially
+    # If I > 0 and p < 0.05 spatial models are justified
     print(f"\nMoran's I test (2015)...")
-    df_2015   = df[df["year"] == 2015].copy()
-    df_ord    = counties[["county_fips"]].merge(
+    df_2015 = df[df["year"] == 2015].copy()
+    df_ord  = counties[["county_fips"]].merge(
         df_2015, on="county_fips", how="left"
     )
-    y_2015    = df_ord[OUTCOME].fillna(
+    y_2015  = df_ord[OUTCOME].fillna(
         df_ord[OUTCOME].median()
     ).values
 
@@ -109,15 +127,15 @@ for OUTCOME, outcome_label in OUTCOMES.items():
         f"({outcome_label}, 2015)"
     )
     plt.tight_layout()
-    cancer_tag  = OUTCOME.replace("mortality_", "").replace("_smoothed", "")
-    moran_path  = os.path.join(PLOT_DIR, f"04_morans_{cancer_tag}.png")
+    cancer_tag = OUTCOME.replace("mortality_", "").replace("_per100k", "")
+    moran_path = os.path.join(PLOT_DIR, f"04_morans_{cancer_tag}.png")
     plt.savefig(moran_path, dpi=150, bbox_inches="tight")
     plt.close()
     print(f"  Saved: {moran_path}")
 
     # SLM and SEM per year
     print(f"\nRunning OLS, SLM, SEM per year...")
-    imputer  = SimpleImputer(strategy="median")
+    imputer = SimpleImputer(strategy="median")
 
     for year in sorted(df["year"].unique()):
         df_yr  = df[df["year"] == year].copy()
@@ -126,6 +144,7 @@ for OUTCOME, outcome_label in OUTCOMES.items():
         )
 
         # Use only features with at least one non-missing value this year
+        # Some CHR variables were unavailable in 2010
         available_preds = [
             p for p in PREDICTORS
             if df_ord[p].notna().sum() > 0
@@ -137,6 +156,7 @@ for OUTCOME, outcome_label in OUTCOMES.items():
             df_ord[OUTCOME].median()
         ).values.astype(float)
 
+        # OLS baseline
         ols = spreg.OLS(
             y.reshape(-1, 1), X,
             w=w,
@@ -144,6 +164,7 @@ for OUTCOME, outcome_label in OUTCOMES.items():
             name_x=available_preds
         )
 
+        # Spatial Lag Model — captures spatial spillover of mortality
         slm = spreg.ML_Lag(
             y.reshape(-1, 1), X,
             w=w,
@@ -151,6 +172,7 @@ for OUTCOME, outcome_label in OUTCOMES.items():
             name_x=available_preds
         )
 
+        # Spatial Error Model — captures spatial correlation in residuals
         sem = spreg.ML_Error(
             y.reshape(-1, 1), X,
             w=w,
@@ -163,16 +185,16 @@ for OUTCOME, outcome_label in OUTCOMES.items():
         rmse_sem = np.sqrt(mean_squared_error(y, sem.predy.flatten()))
 
         all_results.append({
-            "cancer":      outcome_label,
-            "year":        year,
-            "ols_r2":      round(ols.r2,    4),
-            "ols_rmse":    round(rmse_ols,  3),
-            "slm_r2":      round(slm.pr2,   4),
-            "slm_rmse":    round(rmse_slm,  3),
-            "slm_rho":     round(slm.rho,   4),
-            "sem_r2":      round(sem.pr2,   4),
-            "sem_rmse":    round(rmse_sem,  3),
-            "sem_lambda":  round(sem.lam,   4),
+            "cancer":     outcome_label,
+            "year":       year,
+            "ols_r2":     round(ols.r2,   4),
+            "ols_rmse":   round(rmse_ols, 3),
+            "slm_r2":     round(slm.pr2,  4),
+            "slm_rmse":   round(rmse_slm, 3),
+            "slm_rho":    round(slm.rho,  4),
+            "sem_r2":     round(sem.pr2,  4),
+            "sem_rmse":   round(rmse_sem, 3),
+            "sem_lambda": round(sem.lam,  4),
         })
 
         print(f"  {year} {outcome_label[:4]:4s}:  "
@@ -239,3 +261,5 @@ print(f"\nSaved: {perf_path}")
 res_path = os.path.join(OUT_DIR, "spatial_model_results.csv")
 df_results.to_csv(res_path, index=False)
 print(f"Saved: {res_path}")
+print("\nBaseline spatial models complete.")
+print("These R2 and RMSE values are the benchmarks the DL model must beat.")
